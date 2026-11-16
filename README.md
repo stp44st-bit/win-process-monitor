@@ -59,7 +59,7 @@
 1. ติดตั้ง Python จาก <https://www.python.org/downloads/> (ติ๊ก **Add python.exe to PATH** ตอนติดตั้ง)
 2. ดาวน์โหลดโปรเจค
    - กดปุ่ม **Code → Download ZIP** แล้วแตกไฟล์ หรือ
-   - `git clone https://github.com/<your-username>/win-process-monitor.git`
+   - `git clone https://github.com/<stp44st-bit>/win-process-monitor.git`
 3. เปิด Command Prompt ในโฟลเดอร์โปรเจค แล้วติดตั้งไลบรารี
    ```bat
    pip install -r requirements.txt
