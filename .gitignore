@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+process_monitor_log.csv
+*.log
