@@ -33,6 +33,7 @@ COLORS = {
     "mid": "#fff2c2",
     "low": "#e3f0ff",
     "ok": "#ffffff",
+    "trusted": "#e6f4ea",
 }
 
 
@@ -46,7 +47,7 @@ def level_key(score: int) -> str:
     return "ok"
 
 
-LEVEL_TH = {"high": "สูง", "mid": "กลาง", "low": "ต่ำ", "ok": "ปกติ"}
+LEVEL_TH = {"high": "สูง", "mid": "กลาง", "low": "ต่ำ", "ok": "ปกติ", "trusted": "เชื่อถือ"}
 
 
 def is_admin() -> bool:
@@ -122,6 +123,7 @@ class App(tk.Tk):
         self.procs: dict[int, pm.ProcInfo] = {}
         self.monitoring = False
         self.alert_count = 0
+        self.alerted: set[tuple[int, str]] = set()
 
         self.var_interval = tk.IntVar(value=5)
         self.var_min = tk.IntVar(value=30)
@@ -234,8 +236,11 @@ class App(tk.Tk):
                   command=self.open_location).pack(pady=2)
         tk.Button(btns, text="คัดลอก path", width=16, relief="groove",
                   command=self.copy_path).pack(pady=2)
+        self.btn_trust = tk.Button(btns, text="เชื่อถือโปรแกรมนี้", width=16, relief="groove",
+                                   fg="#2e7d32", command=self.toggle_trust)
+        self.btn_trust.pack(pady=(14, 2))
         tk.Button(btns, text="ปิดโปรเซสนี้", width=16, relief="groove", fg="#c62828",
-                  command=self.kill_selected).pack(pady=(14, 2))
+                  command=self.kill_selected).pack(pady=2)
         bottom.add(det, text="  รายละเอียด  ")
 
         # แท็บประวัติแจ้งเตือน
@@ -248,8 +253,18 @@ class App(tk.Tk):
         tk.Button(al, text="เปิดไฟล์ log", relief="groove",
                   command=self.open_log).pack(side="right", padx=8, anchor="n")
         bottom.add(al, text="  ประวัติแจ้งเตือน (0)  ")
+        tr = tk.Frame(bottom, padx=8, pady=6)
+        self.lst_trust = tk.Listbox(tr, font=FONT, activestyle="none")
+        self.lst_trust.pack(side="left", fill="both", expand=True)
+        tsb = ttk.Scrollbar(tr, orient="vertical", command=self.lst_trust.yview)
+        self.lst_trust.configure(yscrollcommand=tsb.set)
+        tsb.pack(side="left", fill="y")
+        tk.Button(tr, text="ลบออกจากรายการ", relief="groove",
+                  command=self.remove_trusted).pack(side="right", padx=8, anchor="n")
+        bottom.add(tr, text="  รายการที่เชื่อถือ  ")
         self.notebook = bottom
         pane.add(bottom, weight=1)
+        self.refresh_trust_list()
 
         self.sort_col, self.sort_rev = "score", True
 
@@ -317,6 +332,10 @@ class App(tk.Tk):
         self.after(200, self.poll_queue)
 
     def add_alert(self, p: pm.ProcInfo, kind: str) -> None:
+        key = (p.pid, p.created)
+        if key in self.alerted:
+            return
+        self.alerted.add(key)
         self.alert_count += 1
         lv = level_key(p.score)
         line = (f"{datetime.now():%H:%M:%S}  [{kind}] {p.name}  PID {p.pid}  "
@@ -359,7 +378,7 @@ class App(tk.Tk):
         }[self.sort_col]
         rows.sort(key=keyf, reverse=self.sort_rev)
         for p in rows:
-            lv = level_key(p.score)
+            lv = "trusted" if p.trusted else level_key(p.score)
             self.tree.insert("", "end", iid=str(p.pid), tags=(lv,), values=(
                 p.pid, p.name, f"{p.cpu:.1f}", f"{p.mem_mb:.1f}", p.conns, p.signed,
                 p.score, LEVEL_TH[lv], p.exe or "-"))
@@ -381,6 +400,7 @@ class App(tk.Tk):
         self.txt_detail.config(state="normal")
         self.txt_detail.delete("1.0", "end")
         if p:
+            self.btn_trust.config(text="เลิกเชื่อถือ" if p.trusted else "เชื่อถือโปรแกรมนี้")
             lines = [
                 f"{p.name}   PID {p.pid}   คะแนน {p.score} ({LEVEL_TH[level_key(p.score)]})",
                 f"Path     : {p.exe or '-'}",
@@ -405,6 +425,51 @@ class App(tk.Tk):
         if p and p.exe:
             self.clipboard_clear()
             self.clipboard_append(p.exe)
+
+    def toggle_trust(self) -> None:
+        p = self.selected()
+        if not p or not p.exe:
+            return
+        if p.trusted:
+            pm.TRUST.remove(p.exe)
+            p.trusted = False
+            messagebox.showinfo("เลิกเชื่อถือแล้ว", f"{p.name} จะถูกตรวจตามปกติตั้งแต่รอบสแกนถัดไป")
+        else:
+            sig = {"yes": "มี signature ถูกต้อง", "no": "ไม่มี signature",
+                   "store": "แอปจาก Store"}.get(p.signed, "ไม่ทราบสถานะ signature")
+            if not messagebox.askyesno(
+                    "ยืนยันการเชื่อถือโปรแกรม",
+                    f"เชื่อถือ {p.name} ใช่ไหม?\n\n{p.exe}\n({sig})\n\n"
+                    "ทำเฉพาะโปรแกรมที่คุณรู้จักและติดตั้งเองเท่านั้น\n"
+                    "ถ้าไฟล์นี้ถูกแก้ไขภายหลัง ระบบจะกลับมาแจ้งเตือนอีกครั้ง"):
+                return
+            if not pm.TRUST.add(p.exe, p.name):
+                messagebox.showerror("ไม่สำเร็จ", "อ่านไฟล์ไม่ได้ ลองเปิดโปรแกรมแบบ Run as administrator")
+                return
+            p.trusted, p.score, p.reasons = True, 0, ["อยู่ในรายการที่เชื่อถือ"]
+        self.refresh_trust_list()
+        self.refresh_table()
+        self.show_detail()
+
+    def refresh_trust_list(self) -> None:
+        self.lst_trust.delete(0, "end")
+        self._trust_keys = []
+        for key, e in sorted(pm.TRUST.items.items(), key=lambda kv: kv[1].get("name", "").lower()):
+            self._trust_keys.append(key)
+            self.lst_trust.insert("end", f"{e.get('name')}   —   {e.get('path')}   (เพิ่มเมื่อ {e.get('added', '-')})")
+        self.notebook.tab(2, text=f"  รายการที่เชื่อถือ ({len(self._trust_keys)})  ")
+
+    def remove_trusted(self) -> None:
+        sel = self.lst_trust.curselection()
+        if not sel:
+            return
+        key = self._trust_keys[sel[0]]
+        pm.TRUST.remove(key)
+        for p in self.procs.values():
+            if p.exe.lower() == key:
+                p.trusted = False
+        self.refresh_trust_list()
+        self.refresh_table()
 
     def kill_selected(self) -> None:
         p = self.selected()

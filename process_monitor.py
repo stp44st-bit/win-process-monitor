@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import subprocess
@@ -39,6 +40,7 @@ except ImportError:
 IS_WINDOWS = os.name == "nt"
 SCRIPT_DIR = Path(__file__).resolve().parent
 LOG_FILE = SCRIPT_DIR / "process_monitor_log.csv"
+TRUST_FILE = SCRIPT_DIR / "trusted.json"
 
 # ---------------------------------------------------------------- สี ANSI
 if IS_WINDOWS and sys.stdout is not None:
@@ -137,6 +139,7 @@ class ProcInfo:
     created: str
     signed: str = "?"          # "yes" / "no" / "?" (ไม่ทราบ)
     signer: str = ""
+    trusted: bool = False
     score: int = 0
     reasons: list[str] = field(default_factory=list)
 
@@ -311,12 +314,84 @@ def score_process(pi: ProcInfo) -> None:
     pi.score = min(pi.score, 100)
 
 
+# ---------------------------------------------------------------- รายการที่เชื่อถือ (whitelist)
+class TrustStore:
+    """เก็บ path + SHA-256 ของโปรแกรมที่ผู้ใช้เชื่อถือ ถ้าไฟล์ถูกแก้ไข hash จะไม่ตรงและกลับมาแจ้งเตือน"""
+
+    def __init__(self, path: Path = TRUST_FILE):
+        self.path = path
+        self.items: dict[str, dict] = {}
+        self._hash_cache: dict[str, tuple[float, int, str]] = {}
+        self.load()
+
+    def load(self) -> None:
+        try:
+            self.items = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            self.items = {}
+
+    def save(self) -> None:
+        self.path.write_text(json.dumps(self.items, ensure_ascii=False, indent=2),
+                             encoding="utf-8")
+
+    def file_hash(self, exe: str) -> str:
+        try:
+            st = os.stat(exe)
+        except OSError:
+            return ""
+        key = exe.lower()
+        cached = self._hash_cache.get(key)
+        if cached and cached[0] == st.st_mtime and cached[1] == st.st_size:
+            return cached[2]
+        h = hashlib.sha256()
+        try:
+            with open(exe, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(chunk)
+        except OSError:
+            return ""
+        digest = h.hexdigest()
+        self._hash_cache[key] = (st.st_mtime, st.st_size, digest)
+        return digest
+
+    def add(self, exe: str, name: str = "") -> bool:
+        digest = self.file_hash(exe)
+        if not digest:
+            return False
+        self.items[exe.lower()] = {
+            "path": exe, "name": name or os.path.basename(exe), "sha256": digest,
+            "added": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        self.save()
+        return True
+
+    def remove(self, exe: str) -> None:
+        if self.items.pop(exe.lower(), None) is not None:
+            self.save()
+
+    def apply(self, pi: ProcInfo) -> None:
+        entry = self.items.get(pi.exe.lower()) if pi.exe else None
+        if not entry:
+            return
+        if self.file_hash(pi.exe) == entry.get("sha256"):
+            pi.trusted = True
+            pi.score = 0
+            pi.reasons = ["อยู่ในรายการที่เชื่อถือ"]
+        else:
+            pi.score = min(pi.score + 40, 100)
+            pi.reasons.append("ไฟล์ถูกแก้ไขหลังจากตั้งเป็นที่เชื่อถือ (hash ไม่ตรง)")
+
+
+TRUST = TrustStore()
+
+
 def analyze(sig: SignatureCache) -> list[ProcInfo]:
     procs = collect_processes()
     sig.check_many([p.exe for p in procs])
     for p in procs:
         p.signed, p.signer = sig.get(p.exe)
         score_process(p)
+        TRUST.apply(p)
     return sorted(procs, key=lambda x: (-x.score, -x.cpu))
 
 
